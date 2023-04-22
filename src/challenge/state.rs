@@ -1,9 +1,15 @@
 #![allow(unused)]
 
-use winit::{event::WindowEvent, window::Window};
+use std::iter;
+
+use wgpu::{RenderPipeline, ShaderModuleDescriptor, SurfaceConfiguration, TextureFormat};
+use winit::{
+    event::{ElementState, KeyboardInput, VirtualKeyCode, WindowEvent},
+    window::Window,
+};
 
 pub struct WgpuState {
-    pub clear_color: wgpu::Color,
+    pub use_color: bool,
 
     pub window: Window,
     pub queue: wgpu::Queue,
@@ -11,6 +17,8 @@ pub struct WgpuState {
     pub surface: wgpu::Surface,
     pub config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
+    pub render_pipeline: wgpu::RenderPipeline,
+    pub challenge_render_pipeline: wgpu::RenderPipeline,
 }
 
 impl WgpuState {
@@ -52,13 +60,13 @@ impl WgpuState {
                         wgpu::Limits::default()
                     },
                 },
-                // Some(&std::path::Path::new("trace")), // Trace path
-                None,
+                None, // Trace path
             )
             .await
             .unwrap();
 
         let surface_caps = surface.get_capabilities(&adapter);
+
         // Shader code in this tutorial assumes an Srgb surface texture. Using a different
         // one will result all the colors comming out darker. If you want to support non
         // Srgb surfaces, you'll need to account for that when drawing to the frame.
@@ -80,14 +88,117 @@ impl WgpuState {
         };
         surface.configure(&device, &config);
 
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shader.wgsl").into()),
+        });
+
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[],
+                push_constant_ranges: &[],
+            });
+
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent::REPLACE,
+                        alpha: wgpu::BlendComponent::REPLACE,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                // Setting this to anything other than Fill requires Features::POLYGON_MODE_LINE
+                // or Features::POLYGON_MODE_POINT
+                polygon_mode: wgpu::PolygonMode::Fill,
+                // Requires Features::DEPTH_CLIP_CONTROL
+                unclipped_depth: false,
+                // Requires Features::CONSERVATIVE_RASTERIZATION
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            // If the pipeline will be used with a multiview render pass, this
+            // indicates how many array layers the attachments will have.
+            multiview: None,
+        });
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Challenge Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/challenge.wgsl").into()),
+        });
+
+        let challenge_render_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Render Pipeline"),
+                layout: Some(&render_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs_main",
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                // If the pipeline will be used with a multiview render pass, this
+                // indicates how many array layers the attachments will have.
+                multiview: None,
+            });
+
+        let use_color = true;
+
         Self {
-            size,
-            queue,
-            window,
-            config,
-            device,
             surface,
-            clear_color: wgpu::Color::BLACK,
+            device,
+            queue,
+            config,
+            render_pipeline,
+            challenge_render_pipeline,
+            use_color,
+            size,
+            window,
         }
     }
 
@@ -104,23 +215,27 @@ impl WgpuState {
         }
     }
 
-    #[allow(unused_variables)]
     pub fn input(&mut self, event: &WindowEvent) -> bool {
         match event {
-            WindowEvent::CursorMoved { position, .. } => {
-                self.clear_color = wgpu::Color {
-                    r: position.x / self.size.width as f64,
-                    g: position.y / self.size.height as f64,
-                    b: 1.0,
-                    a: 1.0,
-                };
+            WindowEvent::KeyboardInput {
+                input:
+                    KeyboardInput {
+                        state,
+                        virtual_keycode: Some(VirtualKeyCode::Space),
+                        ..
+                    },
+                ..
+            } => {
+                self.use_color = *state == ElementState::Released;
                 true
             }
             _ => false,
         }
     }
 
-    pub fn render(&mut self, clear_color: wgpu::Color) -> Result<(), wgpu::SurfaceError> {
+    pub fn update(&mut self) {}
+
+    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -133,26 +248,35 @@ impl WgpuState {
             });
 
         {
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear_color),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.1,
+                            g: 0.2,
+                            b: 0.3,
+                            a: 1.0,
+                        }),
                         store: true,
                     },
                 })],
                 depth_stencil_attachment: None,
             });
+
+            render_pass.set_pipeline(if self.use_color {
+                &self.render_pipeline
+            } else {
+                &self.challenge_render_pipeline
+            });
+            render_pass.draw(0..3, 0..1);
         }
 
-        // submit will accept anything that implements IntoIter
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.queue.submit(iter::once(encoder.finish()));
         output.present();
 
         Ok(())
     }
-
-    pub fn update(&mut self) {}
 }
