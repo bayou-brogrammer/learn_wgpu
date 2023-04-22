@@ -1,24 +1,28 @@
 #![allow(unused)]
 
-use std::iter;
-
-use wgpu::{RenderPipeline, ShaderModuleDescriptor, SurfaceConfiguration, TextureFormat};
+use learn_wgpu::vertex::VERTICES;
+use wgpu::{util::DeviceExt, RenderPipeline, SurfaceConfiguration, TextureFormat};
 use winit::{
     event::{ElementState, KeyboardInput, VirtualKeyCode, WindowEvent},
     window::Window,
 };
 
+use crate::vertex::{Vertex, INDICES};
+
 pub struct WgpuState {
-    pub use_color: bool,
+    pub show_complex: bool,
+    pub challenge_index_buffer: wgpu::Buffer,
+    pub challenge_vertex_buffer: wgpu::Buffer,
 
     pub window: Window,
     pub queue: wgpu::Queue,
     pub device: wgpu::Device,
     pub surface: wgpu::Surface,
+    pub index_buffer: wgpu::Buffer,
+    pub vertex_buffer: wgpu::Buffer,
     pub config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
     pub render_pipeline: wgpu::RenderPipeline,
-    pub challenge_render_pipeline: wgpu::RenderPipeline,
 }
 
 impl WgpuState {
@@ -60,13 +64,13 @@ impl WgpuState {
                         wgpu::Limits::default()
                     },
                 },
-                None, // Trace path
+                // Some(&std::path::Path::new("trace")), // Trace path
+                None,
             )
             .await
             .unwrap();
 
         let surface_caps = surface.get_capabilities(&adapter);
-
         // Shader code in this tutorial assumes an Srgb surface texture. Using a different
         // one will result all the colors comming out darker. If you want to support non
         // Srgb surfaces, you'll need to account for that when drawing to the frame.
@@ -88,10 +92,69 @@ impl WgpuState {
         };
         surface.configure(&device, &config);
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shader.wgsl").into()),
+        let render_pipeline = Self::create_render_pipeline(&device, &config);
+
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            usage: wgpu::BufferUsages::VERTEX,
+            contents: bytemuck::cast_slice(VERTICES),
         });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Index Buffer"),
+            usage: wgpu::BufferUsages::INDEX,
+            contents: bytemuck::cast_slice(INDICES),
+        });
+
+        let num_vertices = 16;
+        let angle = std::f32::consts::PI * 2.0 / num_vertices as f32;
+        let challenge_verts = (0..num_vertices)
+            .map(|i| {
+                let theta = angle * i as f32;
+                Vertex {
+                    position: [0.5 * theta.cos(), -0.5 * theta.sin(), 0.0],
+                    color: [(1.0 + theta.cos()) / 2.0, (1.0 + theta.sin()) / 2.0, 1.0],
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let num_triangles = num_vertices - 2;
+        let challenge_indices = (1u16..num_triangles + 1)
+            .flat_map(|i| vec![i + 1, i, 0])
+            .collect::<Vec<_>>();
+
+        let challenge_vertex_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Challenge Vertex Buffer"),
+                contents: bytemuck::cast_slice(&challenge_verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let challenge_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Challenge Index Buffer"),
+            contents: bytemuck::cast_slice(&challenge_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        Self {
+            size,
+            queue,
+            config,
+            window,
+            device,
+            surface,
+            index_buffer,
+            vertex_buffer,
+            render_pipeline,
+            show_complex: false,
+            challenge_index_buffer,
+            challenge_vertex_buffer,
+        }
+    }
+
+    pub fn create_render_pipeline(
+        device: &wgpu::Device,
+        config: &SurfaceConfiguration,
+    ) -> RenderPipeline {
+        let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/shader.wgsl"));
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -100,13 +163,13 @@ impl WgpuState {
                 push_constant_ranges: &[],
             });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[],
+                buffers: &[Vertex::desc()],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -142,64 +205,7 @@ impl WgpuState {
             // If the pipeline will be used with a multiview render pass, this
             // indicates how many array layers the attachments will have.
             multiview: None,
-        });
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Challenge Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/challenge.wgsl").into()),
-        });
-
-        let challenge_render_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Render Pipeline"),
-                layout: Some(&render_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: "vs_main",
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: "fs_main",
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: config.format,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: Some(wgpu::Face::Back),
-                    // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState {
-                    count: 1,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-                // If the pipeline will be used with a multiview render pass, this
-                // indicates how many array layers the attachments will have.
-                multiview: None,
-            });
-
-        let use_color = true;
-
-        Self {
-            surface,
-            device,
-            queue,
-            config,
-            render_pipeline,
-            challenge_render_pipeline,
-            use_color,
-            size,
-            window,
-        }
+        })
     }
 
     pub fn window(&self) -> &Window {
@@ -215,6 +221,7 @@ impl WgpuState {
         }
     }
 
+    #[allow(unused_variables)]
     pub fn input(&mut self, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::KeyboardInput {
@@ -226,7 +233,7 @@ impl WgpuState {
                     },
                 ..
             } => {
-                self.use_color = *state == ElementState::Released;
+                self.show_complex = *state == ElementState::Pressed;
                 true
             }
             _ => false,
@@ -250,31 +257,46 @@ impl WgpuState {
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.2,
-                            b: 0.3,
-                            a: 1.0,
-                        }),
-                        store: true,
-                    },
-                })],
+                color_attachments: &[
+                    // This is what @location(0) in the fragment shader targets
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.1,
+                                g: 0.2,
+                                b: 0.3,
+                                a: 1.0,
+                            }),
+                            store: true,
+                        },
+                    }),
+                ],
                 depth_stencil_attachment: None,
             });
 
-            render_pass.set_pipeline(if self.use_color {
-                &self.render_pipeline
+            // NEW!
+            render_pass.set_pipeline(&self.render_pipeline);
+
+            let vertex_buffer = if self.show_complex {
+                &self.challenge_vertex_buffer
             } else {
-                &self.challenge_render_pipeline
-            });
-            render_pass.draw(0..3, 0..1);
+                &self.vertex_buffer
+            };
+
+            let index_buffer = if self.show_complex {
+                &self.challenge_index_buffer
+            } else {
+                &self.index_buffer
+            };
+
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..(index_buffer.size() / 2) as u32, 0, 0..1);
         }
 
-        self.queue.submit(iter::once(encoder.finish()));
+        self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
         Ok(())
