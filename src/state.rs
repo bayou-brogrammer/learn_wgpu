@@ -3,6 +3,8 @@
 use winit::{event::WindowEvent, window::Window};
 
 pub struct WgpuState {
+    pub clear_color: wgpu::Color,
+
     pub window: Window,
     pub queue: wgpu::Queue,
     pub device: wgpu::Device,
@@ -79,12 +81,13 @@ impl WgpuState {
         surface.configure(&device, &config);
 
         Self {
-            surface,
-            device,
-            queue,
-            config,
             size,
+            queue,
             window,
+            config,
+            device,
+            surface,
+            clear_color: wgpu::Color::BLACK,
         }
     }
 
@@ -103,10 +106,21 @@ impl WgpuState {
 
     #[allow(unused_variables)]
     pub fn input(&mut self, event: &WindowEvent) -> bool {
-        false
+        match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                self.clear_color = wgpu::Color {
+                    r: position.x / self.size.width as f64,
+                    g: position.y / self.size.height as f64,
+                    b: 1.0,
+                    a: 1.0,
+                };
+                true
+            }
+            _ => false,
+        }
     }
 
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    pub fn render(&mut self, clear_color: wgpu::Color) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -125,12 +139,7 @@ impl WgpuState {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.2,
-                            b: 0.3,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(clear_color),
                         store: true,
                     },
                 })],

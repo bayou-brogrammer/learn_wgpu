@@ -78,7 +78,7 @@ pub async fn run() {
             }
             Event::RedrawRequested(window_id) if window_id == state.window().id() => {
                 state.update();
-                match state.render() {
+                match state.render(state.clear_color) {
                     Ok(_) => {}
                     // Reconfigure the surface if it's lost or outdated
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
