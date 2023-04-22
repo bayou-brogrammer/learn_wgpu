@@ -1,12 +1,12 @@
 [package]
-default-run = "learn_wgpu_main"
+default-run = "learn_wgpu"
 edition     = "2021"
 name        = "learn_wgpu"
 resolver    = "2"
 version     = "0.1.0"
 
-# [lib]
-# crate-type = ["cdylib", "rlib"]
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [workspace]
 members = ["run-wasm"]
@@ -157,9 +157,5 @@ web-sys = { version = "0.3", features = [
 wgpu = { version = "0.16", features = ["webgl"] }
 
 [[bin]]
-name = "learn_wgpu_main"
-path = "src/main.rs"
-
-[[bin]]
-name = "learn_wgpu_challenge"
+name = "challenge"
 path = "src/challenge/main.rs"
