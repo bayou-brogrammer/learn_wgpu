@@ -11,6 +11,10 @@ use wasm_bindgen::prelude::*;
 
 use crate::state::WgpuState;
 
+fn main() {
+    pollster::block_on(run());
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(start))]
 pub async fn run() {
     cfg_if::cfg_if! {
@@ -78,7 +82,7 @@ pub async fn run() {
             }
             Event::RedrawRequested(window_id) if window_id == state.window().id() => {
                 state.update();
-                match state.render() {
+                match state.render(state.clear_color) {
                     Ok(_) => {}
                     // Reconfigure the surface if it's lost or outdated
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
