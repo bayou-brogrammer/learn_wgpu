@@ -3,9 +3,18 @@
 use wgpu::{util::DeviceExt, RenderPipeline, SurfaceConfiguration, TextureFormat};
 use winit::{event::WindowEvent, window::Window};
 
-use crate::vertex::{Vertex, INDICES, VERTICES};
+use crate::{
+    camera::{Camera, CameraController, CameraStaging, CameraUniform},
+    vertex::{Vertex, INDICES, VERTICES},
+};
 
 pub struct WgpuState {
+    camera_buffer: wgpu::Buffer,
+    camera_uniform: CameraUniform,
+    camera_bind_group: wgpu::BindGroup,
+    camera_staging: CameraStaging,
+    pub camera_controller: crate::camera::CameraController,
+
     pub window: Window,
     pub queue: wgpu::Queue,
     pub device: wgpu::Device,
@@ -132,10 +141,6 @@ impl WgpuState {
             label: Some("diffuse_bind_group"),
         });
 
-        // PIPELINE STUFF
-        let render_pipeline =
-            Self::create_render_pipeline(&device, &config, &texture_bind_group_layout);
-
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             usage: wgpu::BufferUsages::VERTEX,
@@ -146,6 +151,50 @@ impl WgpuState {
             contents: bytemuck::cast_slice(INDICES),
             usage: wgpu::BufferUsages::INDEX,
         });
+
+        let camera_controller = CameraController::new(0.2);
+        let camera = Self::create_camera(config.width as f32, config.height as f32);
+        let mut camera_uniform = CameraUniform::new();
+        let camera_staging = CameraStaging::new(camera);
+        camera_staging.update_camera(&mut camera_uniform);
+
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera Buffer"),
+            contents: bytemuck::cast_slice(&[camera_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("camera_bind_group_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("camera_bind_group"),
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+        });
+
+        // PIPELINE STUFF
+        let render_pipeline = Self::create_render_pipeline(
+            &device,
+            &config,
+            &texture_bind_group_layout,
+            &camera_bind_group_layout,
+        );
 
         Self {
             size,
@@ -158,20 +207,27 @@ impl WgpuState {
             vertex_buffer,
             render_pipeline,
             diffuse_bind_group,
+
+            camera_buffer,
+            camera_uniform,
+            camera_bind_group,
+            camera_controller,
+            camera_staging,
         }
     }
 
     pub fn create_render_pipeline(
         device: &wgpu::Device,
         config: &SurfaceConfiguration,
-        bind_group_layout: &wgpu::BindGroupLayout,
+        texture_bind_group_layout: &wgpu::BindGroupLayout,
+        camera_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> RenderPipeline {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/shader.wgsl"));
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[bind_group_layout], // NEW!
+                bind_group_layouts: &[texture_bind_group_layout, camera_bind_group_layout], // NEW!
                 push_constant_ranges: &[],
             });
 
@@ -220,6 +276,22 @@ impl WgpuState {
         })
     }
 
+    pub fn create_camera(width: f32, height: f32) -> Camera {
+        Camera {
+            znear: 0.1,
+            fovy: 45.0,
+            zfar: 100.0,
+            // position the camera one unit up and 2 units back
+            // +z is out of the screen
+            eye: (0.0, 1.0, 2.0).into(),
+            // have it look at the origin
+            target: (0.0, 0.0, 0.0).into(),
+            // which way is "up"
+            up: cgmath::Vector3::unit_y(),
+            aspect: width / height,
+        }
+    }
+
     pub fn window(&self) -> &Window {
         &self.window
     }
@@ -235,10 +307,20 @@ impl WgpuState {
 
     #[allow(unused_variables)]
     pub fn input(&mut self, event: &WindowEvent) -> bool {
-        false
+        self.camera_controller.process_events(event)
     }
 
-    pub fn update(&mut self) {}
+    pub fn update(&mut self) {
+        self.camera_controller
+            .update_camera(&mut self.camera_staging.camera);
+        self.camera_staging.model_rotation += cgmath::Deg(2.0);
+        self.camera_staging.update_camera(&mut self.camera_uniform);
+        self.queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[self.camera_uniform]),
+        );
+    }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
@@ -275,7 +357,10 @@ impl WgpuState {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
+
             render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
